@@ -37,6 +37,9 @@ int current_mode = 'p';
 bool is_running = true;
 int scroll_offset = 0;
 
+int cpu_history[50] = {0};
+int mem_history[50] = {0};
+
 // Mock or calculated system stats for the header
 double get_cpu_load() {
 #ifdef _WIN32
@@ -131,6 +134,24 @@ void draw_footer() {
   wnoutrefresh(ftr_win);
 }
 
+void draw_graph(WINDOW *win, int y, int x, int *history, int size) {
+  for (int i = 0; i < size; i++) {
+    int val = history[i];
+    int color = (val < 50) ? C_HEALTHY : C_STRESS;
+    
+    char bar_char = ' ';
+    if (val > 80) bar_char = '|';
+    else if (val > 60) bar_char = '!';
+    else if (val > 40) bar_char = ':';
+    else if (val > 20) bar_char = '.';
+    else if (val > 0) bar_char = ',';
+
+    wattron(win, COLOR_PAIR(color) | A_BOLD);
+    mvwaddch(win, y, x + i, bar_char);
+    wattroff(win, COLOR_PAIR(color) | A_BOLD);
+  }
+}
+
 // ------ MODULES ------
 
 void do_proc(WINDOW *win) {
@@ -189,6 +210,9 @@ void do_mem(WINDOW *win) {
   get_mem_stats(&tMB, &aMB);
   mvwprintw(win, 3, 2, "%-20s : %.2f MB", "Total Physical RAM", tMB);
   mvwprintw(win, 4, 2, "%-20s : %.2f MB", "Available RAM", aMB);
+
+  mvwprintw(win, 6, 2, "Memory Usage History (50s):");
+  draw_graph(win, 7, 2, mem_history, 50);
 }
 
 void do_disk(WINDOW *win) {
@@ -320,6 +344,9 @@ void do_cpu(WINDOW *win) {
   mvwprintw(win, 6, 2, "L1 D-Cache       : %llu bytes", l1d);
   mvwprintw(win, 7, 2, "L2 Cache         : %llu bytes", l2);
 #endif
+
+  mvwprintw(win, 9, 2, "CPU Usage History (50s):");
+  draw_graph(win, 10, 2, cpu_history, 50);
 }
 
 void do_orphan(WINDOW *win) {
@@ -480,6 +507,17 @@ void cleanup_sync() {
 
 void main_event_loop() {
   while (is_running) {
+    for (int i = 0; i < 49; i++) {
+        cpu_history[i] = cpu_history[i + 1];
+        mem_history[i] = mem_history[i + 1];
+    }
+    double cpu_now = get_cpu_load();
+    double totMem = 0, availMem = 0;
+    get_mem_stats(&totMem, &availMem);
+    double memPct = (totMem > 0) ? ((totMem - availMem) / totMem) * 100.0 : 0.0;
+    cpu_history[49] = (int)cpu_now;
+    mem_history[49] = (int)memPct;
+
     draw_header();
     draw_footer();
 
