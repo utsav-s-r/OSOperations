@@ -54,3 +54,14 @@ build/
 # --- Debugging & Logs ---
 *.log
 *.dSYM/
+
+# --- CMake ---
+build/
+.cache/
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+compile_commands.json

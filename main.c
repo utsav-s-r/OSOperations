@@ -1,3 +1,11 @@
+/*
+ * ZenithOS - A simple, cross-platform terminal-based operating system monitor.
+ * mkdir build && cd build
+ * cmake ..
+ * make || cmake --build . || cmake --build . --target clean
+ * ./zenith_os
+ */
+
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -138,13 +146,18 @@ void draw_graph(WINDOW *win, int y, int x, int *history, int size) {
   for (int i = 0; i < size; i++) {
     int val = history[i];
     int color = (val < 50) ? C_HEALTHY : C_STRESS;
-    
+
     char bar_char = ' ';
-    if (val > 80) bar_char = '|';
-    else if (val > 60) bar_char = '!';
-    else if (val > 40) bar_char = ':';
-    else if (val > 20) bar_char = '.';
-    else if (val > 0) bar_char = ',';
+    if (val > 80)
+      bar_char = '|';
+    else if (val > 60)
+      bar_char = '!';
+    else if (val > 40)
+      bar_char = ':';
+    else if (val > 20)
+      bar_char = '.';
+    else if (val > 0)
+      bar_char = ',';
 
     wattron(win, COLOR_PAIR(color) | A_BOLD);
     mvwaddch(win, y, x + i, bar_char);
@@ -325,7 +338,8 @@ void do_cpu(WINDOW *win) {
   SYSTEM_INFO sysInfo;
   GetSystemInfo(&sysInfo);
   mvwprintw(win, 3, 2, "Logical Processors: %lu", sysInfo.dwNumberOfProcessors);
-  mvwprintw(win, 4, 2, "Architecture      : %u", sysInfo.wProcessorArchitecture);
+  mvwprintw(win, 4, 2, "Architecture      : %u",
+            sysInfo.wProcessorArchitecture);
   mvwprintw(win, 5, 2, "Page Size         : %lu bytes", sysInfo.dwPageSize);
 #else
   int pcore = 0, ecore = 0;
@@ -395,8 +409,8 @@ void do_orphan(WINDOW *win) {
           strcmp(proc_info.pbi_name, "idle") != 0) {
         if (current_index >= scroll_offset) {
           wattron(win, COLOR_PAIR(C_GHOST) | A_BOLD);
-          mvwprintw(win, line++, 2, "%-10d %-10d %s", pids[i], proc_info.pbi_ppid,
-                    proc_info.pbi_name);
+          mvwprintw(win, line++, 2, "%-10d %-10d %s", pids[i],
+                    proc_info.pbi_ppid, proc_info.pbi_name);
           wattroff(win, COLOR_PAIR(C_GHOST) | A_BOLD);
         }
         current_index++;
@@ -508,8 +522,8 @@ void cleanup_sync() {
 void main_event_loop() {
   while (is_running) {
     for (int i = 0; i < 49; i++) {
-        cpu_history[i] = cpu_history[i + 1];
-        mem_history[i] = mem_history[i + 1];
+      cpu_history[i] = cpu_history[i + 1];
+      mem_history[i] = mem_history[i + 1];
     }
     double cpu_now = get_cpu_load();
     double totMem = 0, availMem = 0;
@@ -553,7 +567,8 @@ void main_event_loop() {
     int ch = getch();
     if (ch != ERR) {
       if (ch == KEY_UP) {
-        if (scroll_offset > 0) scroll_offset--;
+        if (scroll_offset > 0)
+          scroll_offset--;
       } else if (ch == KEY_DOWN) {
         scroll_offset++;
       } else {
