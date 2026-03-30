@@ -35,6 +35,7 @@ WINDOW *hdr_win, *main_win, *ftr_win;
 int max_y, max_x;
 int current_mode = 'p';
 bool is_running = true;
+int scroll_offset = 0;
 
 // Mock or calculated system stats for the header
 double get_cpu_load() {
@@ -143,10 +144,14 @@ void do_proc(WINDOW *win) {
     PROCESSENTRY32 pe;
     pe.dwSize = sizeof(PROCESSENTRY32);
     int line = 2;
+    int current_index = 0;
     if (Process32First(hSnap, &pe)) {
       do {
-        mvwprintw(win, line++, 2, "%-10lu %-10lu %s", pe.th32ProcessID,
-                  pe.th32ParentProcessID, pe.szExeFile);
+        if (current_index >= scroll_offset) {
+          mvwprintw(win, line++, 2, "%-10lu %-10lu %s", pe.th32ProcessID,
+                    pe.th32ParentProcessID, pe.szExeFile);
+        }
+        current_index++;
         if (line >= max_y - 8)
           break; // scroll limit
       } while (Process32Next(hSnap, &pe));
@@ -158,14 +163,18 @@ void do_proc(WINDOW *win) {
   int count = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
   int num_pids = count / sizeof(pid_t);
   int line = 2;
+  int current_index = 0;
   for (int i = 0; i < num_pids && line < max_y - 8; i++) {
     if (pids[i] == 0)
       continue;
     struct proc_bsdinfo proc_info;
     if (proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 0, &proc_info,
                      sizeof(proc_info)) == sizeof(proc_info)) {
-      mvwprintw(win, line++, 2, "%-10d %-10d %s", pids[i], proc_info.pbi_ppid,
-                proc_info.pbi_name);
+      if (current_index >= scroll_offset) {
+        mvwprintw(win, line++, 2, "%-10d %-10d %s", pids[i], proc_info.pbi_ppid,
+                  proc_info.pbi_name);
+      }
+      current_index++;
     }
   }
 #endif
@@ -237,9 +246,13 @@ void do_ipc(WINDOW *win) {
   if (GetExtendedTcpTable(pTcp, &dwSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL,
                           0) == NO_ERROR) {
     int line = 3;
-    for (int i = 0; i < pTcp->dwNumEntries && line < max_y - 8; i++) {
-      mvwprintw(win, line++, 2, "TCP PID %lu State: %lu",
-                pTcp->table[i].dwOwningPid, pTcp->table[i].dwState);
+    int current_index = 0;
+    for (int i = 0; i < (int)pTcp->dwNumEntries && line < max_y - 8; i++) {
+      if (current_index >= scroll_offset) {
+        mvwprintw(win, line++, 2, "TCP PID %lu State: %lu",
+                  pTcp->table[i].dwOwningPid, pTcp->table[i].dwState);
+      }
+      current_index++;
     }
   }
   free(pTcp);
@@ -249,6 +262,7 @@ void do_ipc(WINDOW *win) {
   int count = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
   int line = 3;
   int num_pids = count / sizeof(pid_t);
+  int current_index = 0;
   for (int i = 0; i < num_pids && line < max_y - 8; i++) {
     if (pids[i] == 0)
       continue;
@@ -263,10 +277,13 @@ void do_ipc(WINDOW *win) {
             scount++;
         }
         if (scount > 0) {
-          struct proc_bsdinfo bi;
-          proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 0, &bi, sizeof(bi));
-          mvwprintw(win, line++, 2, "%-10d %-20s %d", pids[i], bi.pbi_name,
-                    scount);
+          if (current_index >= scroll_offset) {
+            struct proc_bsdinfo bi;
+            proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 0, &bi, sizeof(bi));
+            mvwprintw(win, line++, 2, "%-10d %-20s %d", pids[i], bi.pbi_name,
+                      scount);
+          }
+          current_index++;
         }
       }
       free(fds);
@@ -281,24 +298,27 @@ void do_cpu(WINDOW *win) {
   wattroff(win, COLOR_PAIR(C_HEADER) | A_BOLD);
 
 #ifdef _WIN32
-  // Windows implementation omitted for brevity, similar translation applied
-  mvwprintw(win, 3, 2, "Windows CPU Topology displayed here.");
+  SYSTEM_INFO sysInfo;
+  GetSystemInfo(&sysInfo);
+  mvwprintw(win, 3, 2, "Logical Processors: %lu", sysInfo.dwNumberOfProcessors);
+  mvwprintw(win, 4, 2, "Architecture      : %u", sysInfo.wProcessorArchitecture);
+  mvwprintw(win, 5, 2, "Page Size         : %lu bytes", sysInfo.dwPageSize);
 #else
-  int lcore = 0, pcore = 0;
-  size_t sz = sizeof(lcore);
-  sysctlbyname("hw.perflevel0.logicalcpu", &lcore, &sz, NULL, 0);
+  int pcore = 0, ecore = 0;
+  size_t sz = sizeof(pcore);
   sysctlbyname("hw.perflevel0.physicalcpu", &pcore, &sz, NULL, 0);
+  sysctlbyname("hw.perflevel1.physicalcpu", &ecore, &sz, NULL, 0);
   uint64_t l1i = 0, l1d = 0, l2 = 0;
   sz = sizeof(uint64_t);
   sysctlbyname("hw.l1icachesize", &l1i, &sz, NULL, 0);
   sysctlbyname("hw.l1dcachesize", &l1d, &sz, NULL, 0);
   sysctlbyname("hw.l2cachesize", &l2, &sz, NULL, 0);
 
-  mvwprintw(win, 3, 2, "Physical Cores: %d", pcore);
-  mvwprintw(win, 4, 2, "Logical Cores : %d", lcore);
-  mvwprintw(win, 5, 2, "L1 I-Cache    : %llu bytes", l1i);
-  mvwprintw(win, 6, 2, "L1 D-Cache    : %llu bytes", l1d);
-  mvwprintw(win, 7, 2, "L2 Cache      : %llu bytes", l2);
+  mvwprintw(win, 3, 2, "Performance Cores: %d", pcore);
+  mvwprintw(win, 4, 2, "Efficiency Cores : %d", ecore);
+  mvwprintw(win, 5, 2, "L1 I-Cache       : %llu bytes", l1i);
+  mvwprintw(win, 6, 2, "L1 D-Cache       : %llu bytes", l1d);
+  mvwprintw(win, 7, 2, "L2 Cache         : %llu bytes", l2);
 #endif
 }
 
@@ -314,13 +334,17 @@ void do_orphan(WINDOW *win) {
     PROCESSENTRY32 pe;
     pe.dwSize = sizeof(PROCESSENTRY32);
     int line = 3;
+    int current_index = 0;
     if (Process32First(hSnap, &pe)) {
       do {
         if (pe.th32ParentProcessID <= 1) {
-          wattron(win, COLOR_PAIR(C_GHOST) | A_BOLD);
-          mvwprintw(win, line++, 2, "%-10lu %-10lu %s", pe.th32ProcessID,
-                    pe.th32ParentProcessID, pe.szExeFile);
-          wattroff(win, COLOR_PAIR(C_GHOST) | A_BOLD);
+          if (current_index >= scroll_offset) {
+            wattron(win, COLOR_PAIR(C_GHOST) | A_BOLD);
+            mvwprintw(win, line++, 2, "%-10lu %-10lu %s", pe.th32ProcessID,
+                      pe.th32ParentProcessID, pe.szExeFile);
+            wattroff(win, COLOR_PAIR(C_GHOST) | A_BOLD);
+          }
+          current_index++;
         }
       } while (Process32Next(hSnap, &pe) && line < max_y - 8);
     }
@@ -331,6 +355,7 @@ void do_orphan(WINDOW *win) {
   int count = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
   int line = 3;
   int num_pids = count / sizeof(pid_t);
+  int current_index = 0;
   for (int i = 0; i < num_pids && line < max_y - 8; i++) {
     if (pids[i] == 0)
       continue;
@@ -338,11 +363,16 @@ void do_orphan(WINDOW *win) {
     if (proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 0, &proc_info,
                      sizeof(proc_info)) == sizeof(proc_info)) {
       if (proc_info.pbi_ppid == 1 &&
-          strcmp(proc_info.pbi_name, "launchd") != 0) {
-        wattron(win, COLOR_PAIR(C_GHOST) | A_BOLD);
-        mvwprintw(win, line++, 2, "%-10d %-10d %s", pids[i], proc_info.pbi_ppid,
-                  proc_info.pbi_name);
-        wattroff(win, COLOR_PAIR(C_GHOST) | A_BOLD);
+          strcmp(proc_info.pbi_name, "launchd") != 0 &&
+          strcmp(proc_info.pbi_name, "kernel_task") != 0 &&
+          strcmp(proc_info.pbi_name, "idle") != 0) {
+        if (current_index >= scroll_offset) {
+          wattron(win, COLOR_PAIR(C_GHOST) | A_BOLD);
+          mvwprintw(win, line++, 2, "%-10d %-10d %s", pids[i], proc_info.pbi_ppid,
+                    proc_info.pbi_name);
+          wattroff(win, COLOR_PAIR(C_GHOST) | A_BOLD);
+        }
+        current_index++;
       }
     }
   }
@@ -484,11 +514,21 @@ void main_event_loop() {
 
     int ch = getch();
     if (ch != ERR) {
-      ch = tolower(ch);
-      if (ch == 'q')
-        is_running = false;
-      else if (strchr("pmdicgs", ch))
-        current_mode = ch;
+      if (ch == KEY_UP) {
+        if (scroll_offset > 0) scroll_offset--;
+      } else if (ch == KEY_DOWN) {
+        scroll_offset++;
+      } else {
+        ch = tolower(ch);
+        if (ch == 'q')
+          is_running = false;
+        else if (strchr("pmdicgs", ch)) {
+          if (current_mode != ch) {
+            current_mode = ch;
+            scroll_offset = 0;
+          }
+        }
+      }
     }
   }
 }
