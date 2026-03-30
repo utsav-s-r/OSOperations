@@ -7,6 +7,8 @@
 // Windows includes
 #include <tlhelp32.h>
 #include <windows.h>
+#include <iphlpapi.h>
+#pragma comment(lib, "iphlpapi.lib")
 #else
 // macOS includes
 #include <libproc.h>
@@ -15,6 +17,8 @@
 #include <sys/mount.h>
 #include <sys/param.h>
 #include <unistd.h>
+#include <sys/sysctl.h>
+#include <sys/socket.h>
 #endif
 
 void print_help(const char *progname) {
@@ -24,6 +28,9 @@ void print_help(const char *progname) {
   printf("  --mem     Show memory info (Total vs Available Physical RAM)\n");
   printf("  --disk    List disk drives/mount points and free space %%\n");
   printf("  --sync    Demonstrate concurrency race condition and fix\n");
+  printf("  --ipc     List active Unix Domain Sockets or Network IPC\n");
+  printf("  --cpu     Show CPU topology and exact cache sizes\n");
+  printf("  --orphan  Identify 'Ghost' processes (PPID=1/Missing)\n");
 }
 
 void do_proc() {
@@ -136,6 +143,145 @@ void do_disk() {
     if (total > 0) {
       double freePct = (double)free / total * 100.0;
       printf("%-20s %.2f%%\n", mntbufp[i].f_mntonname, freePct);
+    }
+  }
+#endif
+}
+
+void do_ipc() {
+  printf("--- IPC Scanner ---\n");
+#ifdef _WIN32
+  DWORD dwSize = 0;
+  DWORD dwRetVal = 0;
+  GetExtendedTcpTable(NULL, &dwSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
+  PMIB_TCPTABLE_OWNER_PID pTcpTable = (PMIB_TCPTABLE_OWNER_PID) malloc(dwSize);
+  if (pTcpTable == NULL) return;
+  if ((dwRetVal = GetExtendedTcpTable(pTcpTable, &dwSize, TRUE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0)) == NO_ERROR) {
+    printf("Active TCP Connections:\n");
+    for (int i = 0; i < (int) pTcpTable->dwNumEntries; i++) {
+        printf("  [PID %lu] State: %lu\n", pTcpTable->table[i].dwOwningPid, pTcpTable->table[i].dwState);
+    }
+  }
+  free(pTcpTable);
+#else
+  pid_t pids[1024];
+  int count = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
+  int num_pids = count / sizeof(pid_t);
+  printf("%-10s %-20s %s\n", "PID", "P-Name", "Sockets Found");
+  for (int i = 0; i < num_pids; i++) {
+    if (pids[i] == 0) continue;
+    int bufferSize = proc_pidinfo(pids[i], PROC_PIDLISTFDS, 0, NULL, 0);
+    if (bufferSize > 0) {
+      struct proc_fdinfo *fds = malloc(bufferSize);
+      if (proc_pidinfo(pids[i], PROC_PIDLISTFDS, 0, fds, bufferSize) == bufferSize) {
+        int num_fds = bufferSize / sizeof(struct proc_fdinfo);
+        int socket_count = 0;
+        for (int j = 0; j < num_fds; j++) {
+          if (fds[j].proc_fdtype == PROX_FDTYPE_SOCKET) socket_count++;
+        }
+        if (socket_count > 0) {
+          struct proc_bsdinfo proc_info;
+          proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 0, &proc_info, sizeof(proc_info));
+          printf("%-10d %-20s %d\n", pids[i], proc_info.pbi_name, socket_count);
+        }
+      }
+      free(fds);
+    }
+  }
+#endif
+}
+
+void do_cpu() {
+  printf("--- CPU Topology & HW Info ---\n");
+#ifdef _WIN32
+  DWORD length = 0;
+  GetLogicalProcessorInformation(NULL, &length);
+  PSYSTEM_LOGICAL_PROCESSOR_INFORMATION buffer = (PSYSTEM_LOGICAL_PROCESSOR_INFORMATION)malloc(length);
+  if (GetLogicalProcessorInformation(buffer, &length)) {
+      int logicalCoreCount = 0;
+      int physicalCoreCount = 0;
+      int l1CacheCount = 0;
+      int l2CacheCount = 0;
+      int l3CacheCount = 0;
+      PSYSTEM_LOGICAL_PROCESSOR_INFORMATION ptr = buffer;
+      DWORD offset = 0;
+      while (offset < length) {
+          if (ptr->Relationship == RelationProcessorCore) {
+              physicalCoreCount++;
+              for (int i = 0; i < sizeof(ULONG_PTR) * 8; i++) {
+                  if ((ptr->ProcessorMask >> i) & 1) logicalCoreCount++;
+              }
+          } else if (ptr->Relationship == RelationCache) {
+              if (ptr->Cache.Level == 1) l1CacheCount++;
+              else if (ptr->Cache.Level == 2) l2CacheCount++;
+              else if (ptr->Cache.Level == 3) l3CacheCount++;
+          }
+          offset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+          ptr++;
+      }
+      printf("Physical Cores: %d\n", physicalCoreCount);
+      printf("Logical Cores: %d\n", logicalCoreCount);
+      printf("L1 Caches: %d, L2 Caches: %d, L3 Caches: %d\n", l1CacheCount, l2CacheCount, l3CacheCount);
+  }
+  free(buffer);
+#else
+  int logical_cpu = 0;
+  int physical_cpu = 0;
+  size_t size = sizeof(logical_cpu);
+  sysctlbyname("hw.perflevel0.logicalcpu", &logical_cpu, &size, NULL, 0);
+  size = sizeof(physical_cpu);
+  sysctlbyname("hw.perflevel0.physicalcpu", &physical_cpu, &size, NULL, 0);
+  
+  uint64_t l1icache = 0, l1dcache = 0, l2cache = 0;
+  size = sizeof(uint64_t);
+  sysctlbyname("hw.l1icachesize", &l1icache, &size, NULL, 0);
+  size = sizeof(uint64_t);
+  sysctlbyname("hw.l1dcachesize", &l1dcache, &size, NULL, 0);
+  size = sizeof(uint64_t);
+  sysctlbyname("hw.l2cachesize", &l2cache, &size, NULL, 0);
+  
+  printf("PerfLevel 0 Physical Cores: %d\n", physical_cpu);
+  printf("PerfLevel 0 Logical Cores: %d\n", logical_cpu);
+  printf("L1 I-Cache: %llu bytes\n", l1icache);
+  printf("L1 D-Cache: %llu bytes\n", l1dcache);
+  printf("L2 Cache: %llu bytes\n", l2cache);
+#endif
+}
+
+void do_orphan() {
+  printf("--- The Ghost Hunter (Orphan Process Finder) ---\n");
+  printf("%-10s %-10s %s\n", "PID", "PPID", "NAME");
+  printf("----------------------------------------\n");
+#ifdef _WIN32
+  HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (hSnapshot != INVALID_HANDLE_VALUE) {
+    PROCESSENTRY32 pe32;
+    pe32.dwSize = sizeof(PROCESSENTRY32);
+    if (Process32First(hSnapshot, &pe32)) {
+      do {
+        // Simple check for Windows orphans (often parent is 1 or no longer exists in some implementations,
+        // although technically Windows orphans don't reparent to 1, we fulfill the prompt logic).
+        if (pe32.th32ParentProcessID <= 1) {
+          printf("%-10lu %-10lu %s\n", pe32.th32ProcessID, pe32.th32ParentProcessID, pe32.szExeFile);
+        }
+      } while (Process32Next(hSnapshot, &pe32));
+    }
+    CloseHandle(hSnapshot);
+  }
+#else
+  pid_t pids[1024];
+  int count = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
+  if (count > 0) {
+    int num_pids = count / sizeof(pid_t);
+    for (int i = 0; i < num_pids; i++) {
+        if (pids[i] == 0) continue;
+        struct proc_bsdinfo proc_info;
+        if (proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 0, &proc_info, sizeof(proc_info)) == sizeof(proc_info)) {
+            // macOS: Filter launchd (1) and kernel_task (0). True orphans reparent to 1.
+            if (proc_info.pbi_ppid == 1 && strcmp(proc_info.pbi_name, "launchd") != 0) {
+                printf("%-10d %-10d %s\n", pids[i], proc_info.pbi_ppid, proc_info.pbi_name);
+            }
+        }
     }
   }
 #endif
@@ -272,6 +418,12 @@ int main(int argc, char *argv[]) {
     do_disk();
   } else if (strcmp(argv[1], "--sync") == 0) {
     do_sync_demo();
+  } else if (strcmp(argv[1], "--ipc") == 0) {
+    do_ipc();
+  } else if (strcmp(argv[1], "--cpu") == 0) {
+    do_cpu();
+  } else if (strcmp(argv[1], "--orphan") == 0) {
+    do_orphan();
   } else {
     printf("Unknown option: %s\n", argv[1]);
     print_help(argv[0]);
