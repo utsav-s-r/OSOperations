@@ -13,13 +13,20 @@ It provides simple system instrumentation including process lists, memory usage,
 
 ## Building and Running
 
-### macOS (M1/M2/M3 natively supported)
+Zenith-OS uses CMake for cross-platform compilation. 
 
-Compilation utilizes Apple's `clang`.
+### Prerequisites
+- CMake (3.10 or higher)
+- A C compiler (Clang/GCC for macOS/Linux, MSVC or MinGW for Windows)
+- `ncurses` library (automatically located by CMake on Unix systems)
 
-1. **Compile**:
+### macOS / Linux
+
+1. **Generate build files and compile**:
    ```sh
-   make
+   mkdir build && cd build
+   cmake ..
+   cmake --build .
    ```
 2. **Run**:
    ```sh
@@ -28,28 +35,18 @@ Compilation utilizes Apple's `clang`.
 
 ### Windows 10/11
 
-#### Option 1: MinGW GCC
-1. Ensure `gcc` is populated onto your system `%PATH%`.
-2. **Compile**:
+1. **Generate build files and compile** (using a Developer Command Prompt or an environment with CMake):
    ```cmd
-   gcc main.c -o zenith_os.exe
+   mkdir build
+   cd build
+   cmake ..
+   cmake --build .
    ```
-3. **Run**:
+2. **Run**:
    ```cmd
-   .\zenith_os.exe [option]
+   .\Debug\zenith_os.exe [option]
    ```
-
-#### Option 2: MSVC cl.exe
-1. Launch an **x64 Native Tools Command Prompt for VS**.
-2. Navigate to this directory.
-3. **Compile**:
-   ```cmd
-   cl /EHsc /Fe:zenith_os.exe main.c
-   ```
-4. **Run**:
-   ```cmd
-   .\zenith_os.exe [option]
-   ```
+   *(Note: The exact path may vary based on your generator. Single-configuration generators like Ninja or MinGW Makefiles will place the executable at `.\zenith_os.exe`.)*
 
 ## Usage Example
 
