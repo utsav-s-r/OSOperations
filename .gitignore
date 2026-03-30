@@ -1,0 +1,56 @@
+# --- Executables & Binaries ---
+# Ignores the compiled output of your C code
+*.exe
+*.out
+*.app
+/Zenith-OS
+/os-insight
+/zenith_os
+
+# --- Build Objects ---
+# Ignores intermediate files created during compilation
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+
+# --- Operating System Specific ---
+# macOS junk (especially the annoying .DS_Store)
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Windows junk
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# --- Database (If using SQLite for your project) ---
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# --- IDEs & Editors ---
+# VS Code
+.vscode/
+*.code-workspace
+
+# Xcode
+build/
+*.xcodeproj/
+*.xcworkspace/
+
+# Vim/Emacs/Sublime
+*~
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# --- Debugging & Logs ---
+*.log
+*.dSYM/
