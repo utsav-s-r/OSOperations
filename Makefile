@@ -1,6 +1,6 @@
 CC = clang
 CFLAGS = -Wall -Wextra -O2
-LDFLAGS = 
+LDFLAGS = -lncurses
 
 TARGET = zenith_os
 SRC = main.c
