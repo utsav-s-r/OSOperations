@@ -15,4 +15,5 @@ if(WIN32)
     # Add any Windows specific compilation flags here if needed
 else()
     target_compile_options(zenith_os PRIVATE -Wall -Wextra -O2)
+    target_link_libraries(zenith_os "-framework Foundation" "-framework CoreFoundation" "-lobjc")
 endif()

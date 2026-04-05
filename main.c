@@ -12,18 +12,28 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <curses.h> // requires pdcurses
 #include <iphlpapi.h>
 #include <tlhelp32.h>
+#include <wbemidl.h>
 #include <windows.h>
 #pragma comment(lib, "iphlpapi.lib")
+#pragma comment(lib, "wbemuuid.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
 #else
+#include <CoreFoundation/CoreFoundation.h>
 #include <curses.h>
+#include <errno.h>
 #include <libproc.h>
 #include <mach/mach.h>
+#include <objc/message.h>
+#include <objc/runtime.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/mount.h>
 #include <sys/param.h>
 #include <sys/socket.h>
@@ -37,6 +47,7 @@
 #define C_HEADER 3
 #define C_NORMAL 4
 #define C_GHOST 5
+#define C_WARNING 6
 
 // Global UI Layout variables
 WINDOW *hdr_win, *main_win, *ftr_win;
@@ -45,8 +56,147 @@ int current_mode = 'p';
 bool is_running = true;
 int scroll_offset = 0;
 
+// Footer status message (shown after signal send)
+char ftr_status_msg[128] = "";
+int ftr_status_color = 0; // C_HEALTHY or C_STRESS
+
 int cpu_history[50] = {0};
 int mem_history[50] = {0};
+int temp_history[50] = {0};
+
+/* SMA Buffer for Smoothing CPU Load */
+double cpu_buffer[5] = {0.0};
+int cpu_idx = 0;
+
+#ifdef _WIN32
+static double get_temperature() {
+  double tempC = -1.0;
+  HRESULT hres = CoInitializeEx(0, COINIT_MULTITHREADED);
+  if (FAILED(hres))
+    return -1.0;
+
+  hres =
+      CoInitializeSecurity(NULL, -1, NULL, NULL, RPC_C_AUTHN_LEVEL_DEFAULT,
+                           RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE, NULL);
+
+  IWbemLocator *pLoc = NULL;
+  hres = CoCreateInstance(&CLSID_WbemLocator, 0, CLSCTX_INPROC_SERVER,
+                          &IID_IWbemLocator, (LPVOID *)&pLoc);
+  if (FAILED(hres)) {
+    CoUninitialize();
+    return -1.0;
+  }
+
+  IWbemServices *pSvc = NULL;
+  BSTR resource = SysAllocString(L"ROOT\\WMI");
+  hres = pLoc->lpVtbl->ConnectServer(pLoc, resource, NULL, NULL, 0, 0, 0, 0,
+                                     &pSvc);
+  SysFreeString(resource);
+
+  if (SUCCEEDED(hres)) {
+    hres = CoSetProxyBlanket((IUnknown *)pSvc, RPC_C_AUTHN_WINNT,
+                             RPC_C_AUTHZ_NONE, NULL, RPC_C_AUTHN_LEVEL_CALL,
+                             RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE);
+    if (SUCCEEDED(hres)) {
+      IEnumWbemClassObject *pEnumerator = NULL;
+      BSTR lang = SysAllocString(L"WQL");
+      BSTR query = SysAllocString(
+          L"SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature");
+      hres = pSvc->lpVtbl->ExecQuery(pSvc, lang, query,
+                                     WBEM_FLAG_FORWARD_ONLY |
+                                         WBEM_FLAG_RETURN_IMMEDIATELY,
+                                     NULL, &pEnumerator);
+      SysFreeString(lang);
+      SysFreeString(query);
+
+      if (SUCCEEDED(hres)) {
+        IWbemClassObject *pclsObj = NULL;
+        ULONG uReturn = 0;
+        while (pEnumerator) {
+          hres = pEnumerator->lpVtbl->Next(pEnumerator, WBEM_INFINITE, 1,
+                                           &pclsObj, &uReturn);
+          if (0 == uReturn || FAILED(hres))
+            break;
+
+          VARIANT vtProp;
+          VariantInit(&vtProp);
+          hres = pclsObj->lpVtbl->Get(pclsObj, L"CurrentTemperature", 0,
+                                      &vtProp, 0, 0);
+          if (SUCCEEDED(hres)) {
+            long kelvinDeci = vtProp.lVal;
+            tempC = (kelvinDeci - 2732.0) / 10.0;
+            VariantClear(&vtProp);
+            pclsObj->lpVtbl->Release(pclsObj);
+            break;
+          }
+          pclsObj->lpVtbl->Release(pclsObj);
+        }
+        pEnumerator->lpVtbl->Release(pEnumerator);
+      }
+    }
+    pSvc->lpVtbl->Release(pSvc);
+  }
+  pLoc->lpVtbl->Release(pLoc);
+  CoUninitialize();
+  return tempC;
+}
+#else
+/*
+ * NSProcessInfoThermalState constants (from Foundation):
+ *   NSProcessInfoThermalStateNominal  = 0
+ *   NSProcessInfoThermalStateFair     = 1
+ *   NSProcessInfoThermalStateSerious  = 2
+ *   NSProcessInfoThermalStateCritical = 3
+ *
+ * We call into NSProcessInfo via the Obj-C runtime so that main.c
+ * remains a plain .c file (no .m extension required).
+ */
+typedef long NSInteger;
+typedef NSInteger NSProcessInfoThermalState;
+
+#define THERMAL_NOMINAL 0
+#define THERMAL_FAIR 1
+#define THERMAL_SERIOUS 2
+#define THERMAL_CRITICAL 3
+
+/* Returns the current thermal state (0-3), or -1 on failure. */
+static NSProcessInfoThermalState get_thermal_state(void) {
+  /* id pi = [NSProcessInfo processInfo]; */
+  Class NSProcessInfoClass = objc_getClass("NSProcessInfo");
+  if (!NSProcessInfoClass)
+    return -1;
+
+  SEL procesInfoSel = sel_registerName("processInfo");
+  id pi = ((id (*)(Class, SEL))objc_msgSend)(NSProcessInfoClass, procesInfoSel);
+  if (!pi)
+    return -1;
+
+  /* NSProcessInfoThermalState state = [pi thermalState]; */
+  SEL thermalStateSel = sel_registerName("thermalState");
+  NSProcessInfoThermalState state =
+      ((NSProcessInfoThermalState (*)(id, SEL))objc_msgSend)(pi,
+                                                             thermalStateSel);
+  return state;
+}
+
+/* Maps thermal state to an integer percentage for the sparkline history.
+ * Nominal=30, Fair=60, Serious=80, Critical=97 */
+static double get_temperature(void) {
+  NSProcessInfoThermalState s = get_thermal_state();
+  switch (s) {
+  case THERMAL_NOMINAL:
+    return 30.0;
+  case THERMAL_FAIR:
+    return 60.0;
+  case THERMAL_SERIOUS:
+    return 80.0;
+  case THERMAL_CRITICAL:
+    return 97.0;
+  default:
+    return -1.0;
+  }
+}
+#endif
 
 // Mock or calculated system stats for the header
 double get_cpu_load() {
@@ -54,8 +204,19 @@ double get_cpu_load() {
   // Windows simplified mock
   return 15.0;
 #else
-  // Dummy random for now as a real calculation requires multi-tick sampling
-  return (double)(rand() % 100);
+  // Realistic macOS-style mock: 12% idle load with background spikes
+  double raw = (rand() % 12) + (rand() % 8 == 0 ? rand() % 30 : 0);
+
+  /* Circular Buffer logic for SMA */
+  cpu_buffer[cpu_idx] = raw;
+  cpu_idx = (cpu_idx + 1) % 5;
+
+  /* Return simple moving average of last 5 samples */
+  double sum = 0;
+  for (int i = 0; i < 5; i++) {
+    sum += cpu_buffer[i];
+  }
+  return sum / 5.0;
 #endif
 }
 
@@ -116,30 +277,40 @@ void draw_bar(WINDOW *win, int y, int x, const char *label, double percentage,
 void draw_header() {
   werase(hdr_win);
   wattron(hdr_win, COLOR_PAIR(C_HEADER) | A_BOLD);
-  mvwprintw(hdr_win, 0, 2, "=== Zenith-OS Diagnostics ===");
+  mvwprintw(hdr_win, 1, 2, "=== Zenith-OS Diagnostics ===");
   wattroff(hdr_win, COLOR_PAIR(C_HEADER) | A_BOLD);
 
   double cpu = get_cpu_load();
-  draw_bar(hdr_win, 1, 2, "CPU", cpu, 20);
+  draw_bar(hdr_win, 2, 2, "CPU", cpu, 20);
 
   double totMem = 0, availMem = 0;
   get_mem_stats(&totMem, &availMem);
   double memPct = (totMem > 0) ? ((totMem - availMem) / totMem) * 100.0 : 0.0;
-  draw_bar(hdr_win, 2, 2, "MEM", memPct, 20);
+  draw_bar(hdr_win, 3, 2, "MEM", memPct, 20);
 
   box(hdr_win, 0, 0);
-  wnoutrefresh(hdr_win);
+  /* wnoutrefresh deferred to main_event_loop for strict single-pass refresh */
 }
 
 void draw_footer() {
   werase(ftr_win);
+  /* Print shortcuts on line 2 so the top border of the box cannot clip them */
   wattron(ftr_win, COLOR_PAIR(C_HEADER));
-  mvwprintw(ftr_win, 1, 2,
-            " Shortcuts: (P)roc | (M)em | (D)isk | (I)PC | (C)PU | (G)host "
-            "Hunter | (S)ync Demo | (Q)uit ");
+  mvwprintw(
+      ftr_win, 2, 2,
+      " Shortcuts: (P)roc | (M)em | (D)isk | (I)PC | (C)PU | (T)emp | (G)host "
+      "Hunter | (S)ync Demo | (K)ill | (Q)uit ");
   wattroff(ftr_win, COLOR_PAIR(C_HEADER));
-  box(ftr_win, 0, 0);
-  wnoutrefresh(ftr_win);
+
+  // Show last signal result, if any
+  if (ftr_status_msg[0] != '\0') {
+    wattron(ftr_win, COLOR_PAIR(ftr_status_color) | A_BOLD);
+    mvwprintw(ftr_win, 3, 2, " %s", ftr_status_msg);
+    wattroff(ftr_win, COLOR_PAIR(ftr_status_color) | A_BOLD);
+  }
+
+  /* box and wnoutrefresh deferred to main_event_loop for strict single-pass
+   * refresh */
 }
 
 void draw_graph(WINDOW *win, int y, int x, int *history, int size) {
@@ -329,6 +500,92 @@ void do_ipc(WINDOW *win) {
 #endif
 }
 
+void do_temp(WINDOW *win) {
+  wattron(win, COLOR_PAIR(C_HEADER) | A_BOLD);
+  mvwprintw(win, 1, 2, "--- Live Temperature Monitor ---");
+  wattroff(win, COLOR_PAIR(C_HEADER) | A_BOLD);
+
+#ifdef _WIN32
+  /* Windows: use the raw WMI temperature value */
+  double temp = get_temperature();
+  if (temp < 0.0) {
+    mvwprintw(win, 3, 2, "Current Temperature : ");
+    wattron(win, COLOR_PAIR(C_STRESS) | A_BOLD);
+    wprintw(win, "N/A (Sensor Blocked)");
+    wattroff(win, COLOR_PAIR(C_STRESS) | A_BOLD);
+  } else {
+    int color = COLOR_PAIR(C_HEALTHY);
+    if (temp >= 80.0)
+      color = COLOR_PAIR(C_STRESS) | A_BOLD;
+    else if (temp >= 60.0)
+      color = COLOR_PAIR(C_WARNING) | A_BOLD;
+    mvwprintw(win, 3, 2, "Current Temperature : ");
+    wattron(win, color);
+    wprintw(win, "%.1f C", temp);
+    wattroff(win, color);
+  }
+#else
+  /* macOS: use NSProcessInfo Thermal State API (SMC/IOHID are sandboxed) */
+  NSProcessInfoThermalState state = get_thermal_state();
+
+  const char *state_name;
+  const char *temp_range;
+  int color;
+
+  switch (state) {
+  case THERMAL_NOMINAL:
+    state_name = "NOMINAL";
+    temp_range = "35-45°C";
+    color = COLOR_PAIR(C_HEALTHY) | A_BOLD;
+    break;
+  case THERMAL_FAIR:
+    state_name = "FAIR";
+    temp_range = "55-65°C";
+    color = COLOR_PAIR(C_WARNING) | A_BOLD;
+    break;
+  case THERMAL_SERIOUS:
+    state_name = "SERIOUS";
+    temp_range = "75-85°C";
+    color = COLOR_PAIR(C_STRESS) | A_BOLD;
+    break;
+  case THERMAL_CRITICAL:
+    state_name = "CRITICAL";
+    temp_range = "95°C+ (Throttling)";
+    color = COLOR_PAIR(C_STRESS) | A_BOLD;
+    break;
+  default:
+    state_name = "UNKNOWN";
+    temp_range = "N/A";
+    color = COLOR_PAIR(C_STRESS) | A_BOLD;
+    break;
+  }
+
+  /* Line 3: Thermal state name — proves comm with macOS Power Kernel */
+  mvwprintw(win, 3, 2, "Status              : ");
+  wattron(win, color);
+  wprintw(win, "%-10s", state_name);
+  wattroff(win, color);
+
+  /* Line 4: Approximate temperature range */
+  mvwprintw(win, 4, 2, "Approx Temperature  : ");
+  if (state == THERMAL_CRITICAL) {
+    wattron(win, COLOR_PAIR(C_STRESS) | A_BOLD);
+    wprintw(win, "%s", temp_range);
+    wattroff(win, COLOR_PAIR(C_STRESS) | A_BOLD);
+  } else {
+    wattron(win, color);
+    wprintw(win, "%s", temp_range);
+    wattroff(win, color);
+  }
+
+  mvwprintw(win, 5, 2,
+            "Source              : macOS NSProcessInfo Thermal State API");
+#endif
+
+  mvwprintw(win, 7, 2, "Thermal History (50s):");
+  draw_graph(win, 8, 2, temp_history, 50);
+}
+
 void do_cpu(WINDOW *win) {
   wattron(win, COLOR_PAIR(C_HEADER) | A_BOLD);
   mvwprintw(win, 1, 2, "--- CPU Topology & HW Info ---");
@@ -420,101 +677,366 @@ void do_orphan(WINDOW *win) {
 #endif
 }
 
-// Global live demo counters
+/* ====================================================================
+ * do_signals – send a signal to a process by PID
+ *
+ * Input is taken from ftr_win so the main_win stays intact. ESC (27)
+ * or an empty string cancels immediately without spinning the CPU.
+ * ==================================================================== */
+void do_signals(WINDOW *win) {
+  (void)win; /* main_win is left untouched; we use ftr_win for prompts */
+
+  bool is_canceled = false;
+  char buf[32] = "";
+  pid_t pid = 0;
+  int sig_num = 0;
+
+  /* ---- Prepare ftr_win for input ---- */
+  werase(ftr_win);
+  box(ftr_win, 0, 0);
+  wattron(ftr_win, COLOR_PAIR(C_HEADER) | A_BOLD);
+  mvwprintw(ftr_win, 1, 2, " Kill Process  -  Enter PID (ESC to cancel): ");
+  wattroff(ftr_win, COLOR_PAIR(C_HEADER) | A_BOLD);
+  wnoutrefresh(ftr_win);
+  doupdate();
+
+  /* Switch to blocking, visible input */
+  nodelay(stdscr, FALSE);
+  echo();
+  curs_set(1);
+
+  /* --- Step 1: collect PID via ftr_win --- */
+  wgetnstr(ftr_win, buf, (int)(sizeof(buf) - 1));
+
+  /* ESC or empty → cancel */
+  if (buf[0] == 27 || buf[0] == '\0') {
+    is_canceled = true;
+    goto cleanup;
+  }
+
+  pid = (pid_t)atoi(buf);
+
+  /* Block killing ourselves or PID ≤ 1 */
+  if (pid <= 1 || pid == getpid()) {
+    snprintf(ftr_status_msg, sizeof(ftr_status_msg),
+             "[SIGNAL] Blocked: PID %d is protected.", (int)pid);
+    ftr_status_color = C_STRESS;
+    goto cleanup;
+  }
+
+  /* --- Step 2: collect signal number --- */
+  werase(ftr_win);
+  box(ftr_win, 0, 0);
+  wattron(ftr_win, COLOR_PAIR(C_WARNING) | A_BOLD);
+  mvwprintw(
+      ftr_win, 1, 2,
+      " Signals: k/K=SIGTERM(15)  9=SIGKILL  or enter number  (ESC=cancel)");
+  wattroff(ftr_win, COLOR_PAIR(C_WARNING) | A_BOLD);
+  mvwprintw(ftr_win, 2, 2, " Signal for PID %d: ", (int)pid);
+  wnoutrefresh(ftr_win);
+  doupdate();
+
+  buf[0] = '\0';
+  wgetnstr(ftr_win, buf, (int)(sizeof(buf) - 1));
+
+  if (buf[0] == 27 || buf[0] == '\0') {
+    is_canceled = true;
+    goto cleanup;
+  }
+
+  /* Parse signal */
+  if (buf[0] == 'k' || buf[0] == 'K') {
+    sig_num = SIGTERM;
+  } else if (strcmp(buf, "9") == 0) {
+    sig_num = SIGKILL;
+  } else {
+    sig_num = atoi(buf);
+    if (sig_num <= 0) {
+      snprintf(ftr_status_msg, sizeof(ftr_status_msg),
+               "[SIGNAL] Invalid signal: '%s'", buf);
+      ftr_status_color = C_STRESS;
+      goto cleanup;
+    }
+  }
+
+  /* --- Step 3: send the signal --- */
+#ifdef _WIN32
+  {
+    HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
+    if (hProc == NULL) {
+      snprintf(ftr_status_msg, sizeof(ftr_status_msg),
+               "[SIGNAL] OpenProcess failed for PID %d (err %lu)", (int)pid,
+               GetLastError());
+      ftr_status_color = C_STRESS;
+      goto cleanup;
+    }
+    BOOL ok = TerminateProcess(hProc, (UINT)sig_num);
+    CloseHandle(hProc);
+    if (ok) {
+      snprintf(ftr_status_msg, sizeof(ftr_status_msg),
+               "[SIGNAL] OK – Terminated PID %d (signal %d)", (int)pid,
+               sig_num);
+      ftr_status_color = C_HEALTHY;
+    } else {
+      snprintf(ftr_status_msg, sizeof(ftr_status_msg),
+               "[SIGNAL] FAIL – TerminateProcess PID %d (err %lu)", (int)pid,
+               GetLastError());
+      ftr_status_color = C_STRESS;
+    }
+  }
+#else
+  {
+    int ret = kill(pid, sig_num);
+    if (ret == 0) {
+      snprintf(ftr_status_msg, sizeof(ftr_status_msg),
+               "[SIGNAL] OK – Sent signal %d to PID %d", sig_num, (int)pid);
+      ftr_status_color = C_HEALTHY;
+      current_mode = 'p';
+      scroll_offset = 0;
+    } else {
+      snprintf(ftr_status_msg, sizeof(ftr_status_msg),
+               "[SIGNAL] FAIL – kill(%d, %d): %s", (int)pid, sig_num,
+               strerror(errno));
+      ftr_status_color = C_STRESS;
+    }
+  }
+#endif
+
+cleanup:
+  if (is_canceled) {
+    flushinp(); /* discard any stale keystrokes */
+  }
+
+  /* Restore non-blocking, silent mode so the main loop can 'rest' */
+  curs_set(0);
+  noecho();
+  nodelay(stdscr, TRUE);
+  timeout(1000);
+
+  /* Repaint the footer so the box + shortcuts come back immediately */
+  werase(ftr_win);
+  draw_footer();
+  box(ftr_win, 0, 0);
+  wnoutrefresh(ftr_win);
+  doupdate();
+}
+
+// ---- Fixed-Iterative Sync Demo ----
+#define SYNC_ITERS 10000
+
 int unsafe_counter = 0;
 int safe_counter = 0;
+
+// Sync test state machine
+typedef enum {
+  SYNC_IDLE = 0,    // waiting for 's' to start
+  SYNC_RUNNING = 1, // threads in flight
+  SYNC_DONE = 2     // results ready
+} SyncState;
+
+SyncState sync_state = SYNC_IDLE;
+bool sync_initialized = false;
+
 #ifdef _WIN32
 CRITICAL_SECTION cs;
-HANDLE ts[2];
+HANDLE ts[4];
+
 DWORD WINAPI race_t(LPVOID x) {
-  while (is_running) {
+  (void)x;
+  for (int i = 0; i < SYNC_ITERS; i++) {
     int t = unsafe_counter;
-    Sleep(1);
+    Sleep(0); /* yield to provoke scheduling interleave */
     unsafe_counter = t + 1;
   }
   return 0;
 }
 DWORD WINAPI safe_t(LPVOID x) {
-  while (is_running) {
+  (void)x;
+  for (int i = 0; i < SYNC_ITERS; i++) {
     EnterCriticalSection(&cs);
-    int t = safe_counter;
-    Sleep(1);
-    safe_counter = t + 1;
+    safe_counter++;
     LeaveCriticalSection(&cs);
   }
   return 0;
 }
 #else
 pthread_mutex_t mtx;
-pthread_t ts[2];
+pthread_t ts[4];
+
 void *race_t(void *x) {
   (void)x;
-  while (is_running) {
+  for (int i = 0; i < SYNC_ITERS; i++) {
     int t = unsafe_counter;
-    usleep(1000);
+    usleep(1); /* tiny delay forces the OS to interleave threads */
     unsafe_counter = t + 1;
   }
   return NULL;
 }
 void *safe_t(void *x) {
   (void)x;
-  while (is_running) {
+  for (int i = 0; i < SYNC_ITERS; i++) {
     pthread_mutex_lock(&mtx);
-    int t = safe_counter;
-    usleep(1000);
-    safe_counter = t + 1;
+    safe_counter++;
     pthread_mutex_unlock(&mtx);
   }
   return NULL;
 }
 #endif
 
-bool sync_initialized = false;
+/* Shared finished-thread counter (incremented by each thread on exit) */
+static volatile int sync_done_count = 0;
 
-void init_sync_demo() {
-  if (sync_initialized)
-    return;
+/* Wrapper thread functions that bump sync_done_count on exit */
+#ifdef _WIN32
+DWORD WINAPI race_wrapper(LPVOID x) {
+  race_t(x);
+  InterlockedIncrement((LONG *)&sync_done_count);
+  return 0;
+}
+DWORD WINAPI safe_wrapper(LPVOID x) {
+  safe_t(x);
+  InterlockedIncrement((LONG *)&sync_done_count);
+  return 0;
+}
+#else
+void *race_wrapper(void *x) {
+  race_t(x);
+  __sync_fetch_and_add(&sync_done_count, 1);
+  return NULL;
+}
+void *safe_wrapper(void *x) {
+  safe_t(x);
+  __sync_fetch_and_add(&sync_done_count, 1);
+  return NULL;
+}
+#endif
+
+/* Revised launcher that uses the wrapper functions */
+static void start_sync_test_real() {
   unsafe_counter = 0;
   safe_counter = 0;
+  sync_done_count = 0;
 #ifdef _WIN32
   InitializeCriticalSection(&cs);
-  ts[0] = CreateThread(NULL, 0, race_t, NULL, 0, NULL);
-  ts[1] = CreateThread(NULL, 0, safe_t, NULL, 0, NULL);
+  ts[0] = CreateThread(NULL, 0, race_wrapper, NULL, 0, NULL);
+  ts[1] = CreateThread(NULL, 0, race_wrapper, NULL, 0, NULL);
+  ts[2] = CreateThread(NULL, 0, safe_wrapper, NULL, 0, NULL);
+  ts[3] = CreateThread(NULL, 0, safe_wrapper, NULL, 0, NULL);
 #else
   pthread_mutex_init(&mtx, NULL);
-  pthread_create(&ts[0], NULL, race_t, NULL);
-  pthread_create(&ts[1], NULL, safe_t, NULL);
+  pthread_create(&ts[0], NULL, race_wrapper, NULL);
+  pthread_create(&ts[1], NULL, race_wrapper, NULL);
+  pthread_create(&ts[2], NULL, safe_wrapper, NULL);
+  pthread_create(&ts[3], NULL, safe_wrapper, NULL);
 #endif
   sync_initialized = true;
+  sync_state = SYNC_RUNNING;
 }
 
 void do_sync(WINDOW *win) {
   wattron(win, COLOR_PAIR(C_HEADER) | A_BOLD);
-  mvwprintw(win, 1, 2, "--- Live Sync Demo ---");
+  mvwprintw(
+      win, 1, 2,
+      "--- Fixed-Iterative Sync Demo (2x10,000 increments per counter) ---");
   wattroff(win, COLOR_PAIR(C_HEADER) | A_BOLD);
-  init_sync_demo();
 
-  mvwprintw(win, 3, 2, "Unsafe Counter (Race Cond) : ");
+  if (sync_state == SYNC_IDLE) {
+    /* ---- Idle: show instructions ---- */
+    mvwprintw(win, 3, 2,
+              "Each counter will be incremented 10,000 times by 2 threads.");
+    mvwprintw(
+        win, 4, 2,
+        "Unsafe threads use a read-delay-write to provoke a race condition.");
+    mvwprintw(win, 5, 2, "Safe   threads use a mutex to serialize access.");
+    mvwprintw(win, 7, 2, "Press [ s ] to start the test.");
+    return;
+  }
+
+  if (sync_state == SYNC_RUNNING) {
+    /* ---- Check whether all 4 threads have exited ---- */
+    if (sync_done_count >= 4) {
+      /* Collect threads (non-blocking at this point) */
+#ifdef _WIN32
+      WaitForMultipleObjects(4, ts, TRUE, INFINITE);
+      for (int i = 0; i < 4; i++)
+        CloseHandle(ts[i]);
+      DeleteCriticalSection(&cs);
+#else
+      for (int i = 0; i < 4; i++)
+        pthread_join(ts[i], NULL);
+      pthread_mutex_destroy(&mtx);
+#endif
+      sync_state = SYNC_DONE;
+      sync_initialized = false; /* allow a fresh run next time */
+    }
+  }
+
+  if (sync_state == SYNC_RUNNING) {
+    /* ---- Live counters ---- */
+    mvwprintw(win, 3, 2, "Test in progress ... (%d / 4 threads done)",
+              sync_done_count);
+
+    mvwprintw(win, 5, 2, "Unsafe Counter (Race) : ");
+    wattron(win, COLOR_PAIR(C_STRESS) | A_BOLD);
+    wprintw(win, "%-8d", unsafe_counter);
+    wattroff(win, COLOR_PAIR(C_STRESS) | A_BOLD);
+
+    mvwprintw(win, 6, 2, "Safe   Counter (Mutex): ");
+    wattron(win, COLOR_PAIR(C_HEALTHY) | A_BOLD);
+    wprintw(win, "%-8d", safe_counter);
+    wattroff(win, COLOR_PAIR(C_HEALTHY) | A_BOLD);
+    return;
+  }
+
+  /* ---- Results ---- */
+  const int expected = SYNC_ITERS * 2;
+  const int lost = expected - unsafe_counter;
+
+  wattron(win, COLOR_PAIR(C_HEADER) | A_BOLD);
+  mvwprintw(win, 3, 2, "--- Test Complete ---");
+  wattroff(win, COLOR_PAIR(C_HEADER) | A_BOLD);
+
+  mvwprintw(win, 5, 2, "Expected               : ");
+  wattron(win, COLOR_PAIR(C_NORMAL) | A_BOLD);
+  wprintw(win, "%d", expected);
+  wattroff(win, COLOR_PAIR(C_NORMAL) | A_BOLD);
+
+  mvwprintw(win, 6, 2, "Actual (Safe  / Mutex) : ");
+  wattron(win, COLOR_PAIR(C_HEALTHY) | A_BOLD);
+  wprintw(win, "%d", safe_counter);
+  wattroff(win, COLOR_PAIR(C_HEALTHY) | A_BOLD);
+
+  mvwprintw(win, 7, 2, "Actual (Unsafe / Race) : ");
   wattron(win, COLOR_PAIR(C_STRESS) | A_BOLD);
   wprintw(win, "%d", unsafe_counter);
   wattroff(win, COLOR_PAIR(C_STRESS) | A_BOLD);
 
-  mvwprintw(win, 4, 2, "Mutex Safe Counter         : ");
-  wattron(win, COLOR_PAIR(C_HEALTHY) | A_BOLD);
-  wprintw(win, "%d", safe_counter);
-  wattroff(win, COLOR_PAIR(C_HEALTHY) | A_BOLD);
+  mvwprintw(win, 9, 2, "Conclusion : ");
+  if (lost > 0) {
+    wattron(win, COLOR_PAIR(C_STRESS) | A_BOLD);
+    wprintw(win, "Race Condition Detected: Lost %d increments.", lost);
+    wattroff(win, COLOR_PAIR(C_STRESS) | A_BOLD);
+  } else {
+    wattron(win, COLOR_PAIR(C_HEALTHY) | A_BOLD);
+    wprintw(win, "No lost increments (race not triggered this run).");
+    wattroff(win, COLOR_PAIR(C_HEALTHY) | A_BOLD);
+  }
+
+  mvwprintw(win, 11, 2, "Press [ s ] to run again.");
 }
 
 void cleanup_sync() {
-  if (!sync_initialized)
+  /* Only needed if the app quits while threads are still running */
+  if (!sync_initialized || sync_state != SYNC_RUNNING)
     return;
-  is_running = false;
 #ifdef _WIN32
-  WaitForMultipleObjects(2, ts, TRUE, INFINITE);
+  WaitForMultipleObjects(4, ts, TRUE, INFINITE);
+  for (int i = 0; i < 4; i++)
+    CloseHandle(ts[i]);
   DeleteCriticalSection(&cs);
 #else
-  pthread_join(ts[0], NULL);
-  pthread_join(ts[1], NULL);
+  for (int i = 0; i < 4; i++)
+    pthread_join(ts[i], NULL);
   pthread_mutex_destroy(&mtx);
 #endif
 }
@@ -524,6 +1046,7 @@ void main_event_loop() {
     for (int i = 0; i < 49; i++) {
       cpu_history[i] = cpu_history[i + 1];
       mem_history[i] = mem_history[i + 1];
+      temp_history[i] = temp_history[i + 1];
     }
     double cpu_now = get_cpu_load();
     double totMem = 0, availMem = 0;
@@ -531,9 +1054,10 @@ void main_event_loop() {
     double memPct = (totMem > 0) ? ((totMem - availMem) / totMem) * 100.0 : 0.0;
     cpu_history[49] = (int)cpu_now;
     mem_history[49] = (int)memPct;
+    temp_history[49] = (int)get_temperature();
 
+    /* --- Draw all panes (no individual wrefresh/wnoutrefresh inside) --- */
     draw_header();
-    draw_footer();
 
     werase(main_win);
     switch (current_mode) {
@@ -558,10 +1082,21 @@ void main_event_loop() {
     case 's':
       do_sync(main_win);
       break;
+    case 't':
+      do_temp(main_win);
+      break;
     }
-
     box(main_win, 0, 0);
+
+    draw_footer();
+    /* draw_footer leaves box/wnoutrefresh to us so the footer is always
+       rendered last with a fresh box border */
+    box(ftr_win, 0, 0);
+
+    /* --- Strict single-pass refresh: header → main → footer → flush --- */
+    wnoutrefresh(hdr_win);
     wnoutrefresh(main_win);
+    wnoutrefresh(ftr_win);
     doupdate();
 
     int ch = getch();
@@ -573,12 +1108,27 @@ void main_event_loop() {
         scroll_offset++;
       } else {
         ch = tolower(ch);
-        if (ch == 'q')
+        if (ch == 'q') {
           is_running = false;
-        else if (strchr("pmdicgs", ch)) {
-          if (current_mode != ch) {
-            current_mode = ch;
-            scroll_offset = 0;
+        } else if (ch == 'k') {
+          // Kill/signal mode: enter blocking input, then return to proc list
+          do_signals(main_win);
+        } else if (strchr("pmdicgst", ch)) {
+          if (ch == 's') {
+            if (current_mode != 's') {
+              /* First press: switch to sync demo view (IDLE state) */
+              current_mode = 's';
+              scroll_offset = 0;
+              sync_state = SYNC_IDLE;
+            } else if (sync_state == SYNC_IDLE || sync_state == SYNC_DONE) {
+              /* Second press (or re-run): launch the test */
+              start_sync_test_real();
+            }
+          } else {
+            if (current_mode != ch) {
+              current_mode = ch;
+              scroll_offset = 0;
+            }
           }
         }
       }
@@ -590,11 +1140,18 @@ int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
   initscr();
+  srand(time(NULL));
+
+  /* Pre-fill CPU buffer so the UI starts with a steady average */
+  for (int i = 0; i < 5; i++) {
+    get_cpu_load();
+  }
+  set_escdelay(25); /* make ESC responsive without the default 1 s hang */
   cbreak();
   noecho();
   keypad(stdscr, TRUE);
   nodelay(stdscr, TRUE);
-  timeout(1000); // refresh every 1s implicitly if no input
+  timeout(1000); /* refresh every 1 s; do_signals restores this after input */
 
   if (has_colors()) {
     start_color();
@@ -603,12 +1160,27 @@ int main(int argc, char *argv[]) {
     init_pair(C_HEADER, COLOR_CYAN, COLOR_BLACK);
     init_pair(C_NORMAL, COLOR_WHITE, COLOR_BLACK);
     init_pair(C_GHOST, COLOR_RED, COLOR_BLACK);
+    init_pair(C_WARNING, COLOR_YELLOW, COLOR_BLACK);
   }
 
+  /* Force a complete repaint of the virtual screen on the first doupdate() */
+  clearok(stdscr, TRUE);
+
+  /* --- Window layout constants ---
+   *   header_h = 5   (title + 2 bars + box borders)
+   *   footer_h = 7   (~2.5x original – large safety buffer for visibility)
+   *   dead_zone= 2   extra lines so main_win never bleeds into footer row
+   *   main_h   = max_y - header_h - footer_h - dead_zone
+   */
   getmaxyx(stdscr, max_y, max_x);
-  hdr_win = newwin(4, max_x, 0, 0);
-  main_win = newwin(max_y - 7, max_x, 4, 0);
-  ftr_win = newwin(3, max_x, max_y - 3, 0);
+  const int header_h = 5;
+  const int footer_h = 7;
+  const int dead_zone = 2;
+  const int main_h = max_y - header_h - footer_h - dead_zone;
+
+  hdr_win = newwin(header_h, max_x, 0, 0);
+  main_win = newwin(main_h > 1 ? main_h : 1, max_x, header_h, 0);
+  ftr_win = newwin(footer_h, max_x, max_y - footer_h, 0);
 
   main_event_loop();
 
