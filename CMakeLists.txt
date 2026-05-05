@@ -4,7 +4,7 @@ project(ZenithOS C)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-add_executable(zenith_os main.c)
+add_executable(zenith_os main.c ui.c modules.c os_stats.c sync.c scheduler.c)
 
 find_package(Curses REQUIRED)
 
