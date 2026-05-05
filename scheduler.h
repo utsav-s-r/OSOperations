@@ -11,8 +11,11 @@ typedef enum {
   SCHED_FCFS = 0,
   SCHED_SJF = 1,
   SCHED_PRIORITY = 2,
-  SCHED_RR = 3
+  SCHED_RR = 3,
+  SCHED_SRTF = 4,
+  SCHED_PREEMPTIVE_PRIORITY = 5
 } SchedulingAlgorithm;
+
 
 typedef struct {
   int pid;

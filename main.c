@@ -3,7 +3,7 @@
 #include "sync.h"
 #include "scheduler.h"
 #include "os_stats.h"
-//cd /Users/utsavsr/Developer/OS_Demo && rm -rf build && cmake -S . -B build && cmake --build build && ./build/zenith_os
+#include "fs_sim.h"
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -57,6 +57,9 @@ void main_event_loop(void) {
     case 'x':
       do_scheduler(main_win);
       break;
+    case 'f':
+      do_fs(main_win);
+      break;
     }
     box(main_win, 0, 0);
 
@@ -86,11 +89,13 @@ void main_event_loop(void) {
         }
       } else {
         ch = tolower(ch);
-        if (ch == 'q') {
+        if (ch == 'q' && !(current_mode == 'f' && fs_input_active)) {
           is_running = false;
-        } else if (ch == 'k') {
+        } else if (ch == 'k' && !(current_mode == 'f' && fs_input_active)) {
           do_signals(main_win);
-        } else if (strchr("pmdicgstx", ch) && (ch != 'x' || current_mode != 'x')) {
+        } else if (strchr("pmdicgstxf", ch) && 
+                   !(current_mode == 'x' && ch == 'x') && 
+                   !(current_mode == 'f' && (ch == 'f' || fs_input_active))) {
           /* Mode switching always works */
           if (ch == 's') {
             if (current_mode != 's') {
@@ -102,13 +107,15 @@ void main_event_loop(void) {
           } else {
             if (current_mode != ch) {
               current_mode = ch;
-              if (ch != 'x') scroll_offset = 0;
+              if (ch != 'x' && ch != 'f') scroll_offset = 0;
             }
           }
         } else {
-          /* Scheduler-specific input (e, r, n, digits, enter, backspace, ESC) */
+          /* Scheduler and FS specific input */
           if (current_mode == 'x') {
             scheduler_handle_input(ch);
+          } else if (current_mode == 'f') {
+            fs_handle_input(ch);
           }
         }
       }

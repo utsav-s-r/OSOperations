@@ -18,7 +18,7 @@ typedef struct {
 static int base_num_processes = 0;
 static int base_time_quantum = 2;
 static Process base_processes[MAX_PROCESSES];
-static AlgorithmResult results[4];
+static AlgorithmResult results[6];
 static bool simulation_complete = false;
 
 typedef enum {
@@ -247,6 +247,23 @@ static void schedule_round_robin(int algo_idx) {
       if (remaining[idx] == 0) {
         procs[idx].completion_time = current_time;
         completed++;
+        
+        int idle_time = time_quantum - exec_time;
+        if (idle_time > 0) {
+          results[algo_idx].gantt[results[algo_idx].gantt_count].pid = 0; 
+          results[algo_idx].gantt[results[algo_idx].gantt_count].start_time = current_time;
+          for(int t = 1; t <= idle_time; t++) {
+            current_time++;
+            for (int i = 0; i < count; i++) {
+              if (!arrived[i] && procs[i].arrival_time <= current_time) {
+                queue[tail++] = i;
+                arrived[i] = true;
+              }
+            }
+          }
+          results[algo_idx].gantt[results[algo_idx].gantt_count].end_time = current_time;
+          results[algo_idx].gantt_count++;
+        }
       } else {
         queue[tail++] = idx; 
       }
@@ -278,11 +295,171 @@ static void schedule_round_robin(int algo_idx) {
   compute_metrics(algo_idx);
 }
 
+static void schedule_srtf(int algo_idx) {
+  results[algo_idx].gantt_count = 0;
+  int current_time = 0;
+  Process *procs = results[algo_idx].processes;
+  int count = base_num_processes;
+
+  memcpy(procs, base_processes, count * sizeof(Process));
+  int remaining[MAX_PROCESSES];
+  bool completed[MAX_PROCESSES] = {false};
+  int completed_count = 0;
+  
+  for (int i = 0; i < count; i++) {
+    remaining[i] = procs[i].burst_time;
+  }
+
+  int last_proc = -1;
+
+  while (completed_count < count) {
+    int next_proc = -1;
+    int min_burst = 1000000;
+
+    for (int i = 0; i < count; i++) {
+      if (!completed[i] && procs[i].arrival_time <= current_time &&
+          remaining[i] < min_burst) {
+        next_proc = i;
+        min_burst = remaining[i];
+      }
+    }
+
+    if (next_proc == -1) {
+      int min_at = 1000000;
+      for (int i = 0; i < count; i++) {
+        if (!completed[i] && procs[i].arrival_time < min_at) {
+          min_at = procs[i].arrival_time;
+        }
+      }
+      
+      if (last_proc != 0 && results[algo_idx].gantt_count < MAX_GANTT_BLOCKS) {
+        results[algo_idx].gantt[results[algo_idx].gantt_count].pid = 0; 
+        results[algo_idx].gantt[results[algo_idx].gantt_count].start_time = current_time;
+        results[algo_idx].gantt[results[algo_idx].gantt_count].end_time = min_at;
+        results[algo_idx].gantt_count++;
+      } else if (last_proc == 0) {
+        results[algo_idx].gantt[results[algo_idx].gantt_count - 1].end_time = min_at;
+      }
+      last_proc = 0;
+      current_time = min_at;
+      continue;
+    }
+
+    if (remaining[next_proc] == procs[next_proc].burst_time) {
+      procs[next_proc].response_time = current_time - procs[next_proc].arrival_time;
+    }
+
+    if (last_proc != next_proc && results[algo_idx].gantt_count < MAX_GANTT_BLOCKS) {
+      results[algo_idx].gantt[results[algo_idx].gantt_count].pid = procs[next_proc].pid;
+      results[algo_idx].gantt[results[algo_idx].gantt_count].start_time = current_time;
+      results[algo_idx].gantt_count++;
+    }
+
+    current_time++;
+    remaining[next_proc]--;
+
+    if (results[algo_idx].gantt_count > 0) {
+      results[algo_idx].gantt[results[algo_idx].gantt_count - 1].end_time = current_time;
+    }
+
+    if (remaining[next_proc] == 0) {
+      procs[next_proc].completion_time = current_time;
+      completed[next_proc] = true;
+      completed_count++;
+    }
+    last_proc = next_proc;
+  }
+
+  results[algo_idx].total_time = current_time;
+  compute_metrics(algo_idx);
+}
+
+static void schedule_preemptive_priority(int algo_idx) {
+  results[algo_idx].gantt_count = 0;
+  int current_time = 0;
+  Process *procs = results[algo_idx].processes;
+  int count = base_num_processes;
+
+  memcpy(procs, base_processes, count * sizeof(Process));
+  int remaining[MAX_PROCESSES];
+  bool completed[MAX_PROCESSES] = {false};
+  int completed_count = 0;
+  
+  for (int i = 0; i < count; i++) {
+    remaining[i] = procs[i].burst_time;
+  }
+
+  int last_proc = -1;
+
+  while (completed_count < count) {
+    int next_proc = -1;
+    int max_priority = 1000000;
+
+    for (int i = 0; i < count; i++) {
+      if (!completed[i] && procs[i].arrival_time <= current_time &&
+          procs[i].priority < max_priority) {
+        next_proc = i;
+        max_priority = procs[i].priority;
+      }
+    }
+
+    if (next_proc == -1) {
+      int min_at = 1000000;
+      for (int i = 0; i < count; i++) {
+        if (!completed[i] && procs[i].arrival_time < min_at) {
+          min_at = procs[i].arrival_time;
+        }
+      }
+      
+      if (last_proc != 0 && results[algo_idx].gantt_count < MAX_GANTT_BLOCKS) {
+        results[algo_idx].gantt[results[algo_idx].gantt_count].pid = 0; 
+        results[algo_idx].gantt[results[algo_idx].gantt_count].start_time = current_time;
+        results[algo_idx].gantt[results[algo_idx].gantt_count].end_time = min_at;
+        results[algo_idx].gantt_count++;
+      } else if (last_proc == 0) {
+        results[algo_idx].gantt[results[algo_idx].gantt_count - 1].end_time = min_at;
+      }
+      last_proc = 0;
+      current_time = min_at;
+      continue;
+    }
+
+    if (remaining[next_proc] == procs[next_proc].burst_time) {
+      procs[next_proc].response_time = current_time - procs[next_proc].arrival_time;
+    }
+
+    if (last_proc != next_proc && results[algo_idx].gantt_count < MAX_GANTT_BLOCKS) {
+      results[algo_idx].gantt[results[algo_idx].gantt_count].pid = procs[next_proc].pid;
+      results[algo_idx].gantt[results[algo_idx].gantt_count].start_time = current_time;
+      results[algo_idx].gantt_count++;
+    }
+
+    current_time++;
+    remaining[next_proc]--;
+
+    if (results[algo_idx].gantt_count > 0) {
+      results[algo_idx].gantt[results[algo_idx].gantt_count - 1].end_time = current_time;
+    }
+
+    if (remaining[next_proc] == 0) {
+      procs[next_proc].completion_time = current_time;
+      completed[next_proc] = true;
+      completed_count++;
+    }
+    last_proc = next_proc;
+  }
+
+  results[algo_idx].total_time = current_time;
+  compute_metrics(algo_idx);
+}
+
 static void run_all_schedules(void) {
   schedule_fcfs(0);
   schedule_sjf(1);
   schedule_priority(2);
   schedule_round_robin(3);
+  schedule_srtf(4);
+  schedule_preemptive_priority(5);
   simulation_complete = true;
   input_active = false;
 }
@@ -294,7 +471,7 @@ void do_scheduler(WINDOW *win) {
 
   if (!input_active && base_num_processes == 0) {
     mvwprintw(win, 3, 2, "Welcome to the Process Scheduler Simulator!");
-    mvwprintw(win, 5, 2, "Displays all 4 algorithms: FCFS, SJF, Priority, RR");
+    mvwprintw(win, 5, 2, "Displays all 6 algorithms: FCFS, SJF, Priority, RR, SRTF, Preemptive Priority");
     mvwprintw(win, 7, 2, "Press [ x ] to start interactive setup.");
     return;
   }
@@ -340,11 +517,11 @@ void do_scheduler(WINDOW *win) {
   mvwprintw(win, 3, 2, "--- Scheduling Results ---"); 
   wattroff(win, COLOR_PAIR(C_HEADER) | A_BOLD);
 
-  const char *algo_names[] = {"FCFS", "SJF", "Priority", "Round Robin"};
+  const char *algo_names[] = {"FCFS", "SJF", "Priority", "Round Robin", "SRTF", "Preemp Priority"};
   int current_line = 0;
   int display_row = 5; 
 
-  for (int algo = 0; algo < 4; algo++) {
+  for (int algo = 0; algo < 6; algo++) {
     // Each algorithm block has: Title (1), Gantt (1), Header (1), Processes (N), Spacer (1)
     
     // Title
@@ -363,8 +540,13 @@ void do_scheduler(WINDOW *win) {
       mvwprintw(win, display_row, gantt_x, "Gantt: ");
       gantt_x += 7;
       for (int i = 0; i < results[algo].gantt_count && gantt_x < max_x - 10; i++) {
-        mvwprintw(win, display_row, gantt_x, "P%d|", results[algo].gantt[i].pid);
-        gantt_x += 4;
+        if (results[algo].gantt[i].pid == 0) {
+          mvwprintw(win, display_row, gantt_x, "IDL|");
+          gantt_x += 4;
+        } else {
+          mvwprintw(win, display_row, gantt_x, "P%d|", results[algo].gantt[i].pid);
+          gantt_x += 4;
+        }
       }
       display_row++;
     }

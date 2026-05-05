@@ -69,7 +69,7 @@ void draw_footer(void) {
   wattron(ftr_win, COLOR_PAIR(C_HEADER));
   mvwprintw(
       ftr_win, 2, 2,
-      " (P)roc | (M)em | (D)isk | (I)PC | (C)PU | (T)emp | (G)host | (S)ync | (X)Sched | (K)ill | (Q)uit ");
+      " (P)roc | (M)em | (D)isk | (I)PC | (C)PU | (T)emp | (G)host | (S)ync | (X)Sched | (F)S | (K)ill | (Q)uit ");
   wattroff(ftr_win, COLOR_PAIR(C_HEADER));
 
   if (ftr_status_msg[0] != '\0') {
