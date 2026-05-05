@@ -12,6 +12,7 @@ int max_x = 0;
 int current_mode = 'p';
 bool is_running = true;
 int scroll_offset = 0;
+int sched_scroll_offset = 0;
 
 char ftr_status_msg[128] = "";
 int ftr_status_color = 0;

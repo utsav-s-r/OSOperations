@@ -71,17 +71,26 @@ void main_event_loop(void) {
     int ch = getch();
     if (ch != ERR) {
       if (ch == KEY_UP) {
-        if (scroll_offset > 0)
-          scroll_offset--;
+        if (current_mode == 'x') {
+          if (sched_scroll_offset > 0)
+            sched_scroll_offset--;
+        } else {
+          if (scroll_offset > 0)
+            scroll_offset--;
+        }
       } else if (ch == KEY_DOWN) {
-        scroll_offset++;
+        if (current_mode == 'x') {
+          sched_scroll_offset++;
+        } else {
+          scroll_offset++;
+        }
       } else {
         ch = tolower(ch);
         if (ch == 'q') {
           is_running = false;
         } else if (ch == 'k') {
           do_signals(main_win);
-        } else if (strchr("pmdicgstx", ch)) {
+        } else if (strchr("pmdicgstx", ch) && (ch != 'x' || current_mode != 'x')) {
           /* Mode switching always works */
           if (ch == 's') {
             if (current_mode != 's') {
@@ -93,7 +102,7 @@ void main_event_loop(void) {
           } else {
             if (current_mode != ch) {
               current_mode = ch;
-              scroll_offset = 0;
+              if (ch != 'x') scroll_offset = 0;
             }
           }
         } else {

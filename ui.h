@@ -20,6 +20,7 @@ extern int max_x;
 extern int current_mode;
 extern bool is_running;
 extern int scroll_offset;
+extern int sched_scroll_offset;
 
 extern char ftr_status_msg[128];
 extern int ftr_status_color;

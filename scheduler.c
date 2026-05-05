@@ -11,9 +11,12 @@ typedef struct {
   GanttBlock gantt[MAX_GANTT_BLOCKS];
   int gantt_count;
   int total_time;
+  double avg_wt;
+  double avg_tat;
 } AlgorithmResult;
 
 static int base_num_processes = 0;
+static int base_time_quantum = 2;
 static Process base_processes[MAX_PROCESSES];
 static AlgorithmResult results[4];
 static bool simulation_complete = false;
@@ -21,9 +24,10 @@ static bool simulation_complete = false;
 typedef enum {
   INPUT_IDLE = 0,
   INPUT_NUM_PROCS = 1,
-  INPUT_PROCESS_AT = 2,
-  INPUT_PROCESS_BT = 3,
-  INPUT_PROCESS_PRIORITY = 4,
+  INPUT_TIME_QUANTUM = 2,
+  INPUT_PROCESS_AT = 3,
+  INPUT_PROCESS_BT = 4,
+  INPUT_PROCESS_PRIORITY = 5,
 } InputState;
 
 static InputState input_state = INPUT_IDLE;
@@ -37,13 +41,20 @@ static int compare_arrival(const void *a, const void *b) {
   return p1->arrival_time - p2->arrival_time;
 }
 
-static void compute_metrics(Process *processes, int count) {
+static void compute_metrics(int algo_idx) {
+  AlgorithmResult *res = &results[algo_idx];
+  double total_wt = 0, total_tat = 0;
+  int count = base_num_processes;
   for (int i = 0; i < count; i++) {
-    processes[i].turnaround_time =
-        processes[i].completion_time - processes[i].arrival_time;
-    processes[i].waiting_time =
-        processes[i].turnaround_time - processes[i].burst_time;
+    res->processes[i].turnaround_time =
+        res->processes[i].completion_time - res->processes[i].arrival_time;
+    res->processes[i].waiting_time =
+        res->processes[i].turnaround_time - res->processes[i].burst_time;
+    total_wt += res->processes[i].waiting_time;
+    total_tat += res->processes[i].turnaround_time;
   }
+  res->avg_wt = total_wt / count;
+  res->avg_tat = total_tat / count;
 }
 
 static void schedule_fcfs(int algo_idx) {
@@ -59,6 +70,7 @@ static void schedule_fcfs(int algo_idx) {
     if (current_time < procs[i].arrival_time) {
       current_time = procs[i].arrival_time;
     }
+    procs[i].response_time = current_time - procs[i].arrival_time;
     results[algo_idx].gantt[results[algo_idx].gantt_count].pid = procs[i].pid;
     results[algo_idx].gantt[results[algo_idx].gantt_count].start_time = current_time;
     current_time += procs[i].burst_time;
@@ -67,7 +79,7 @@ static void schedule_fcfs(int algo_idx) {
     results[algo_idx].gantt_count++;
   }
   results[algo_idx].total_time = current_time;
-  compute_metrics(procs, count);
+  compute_metrics(algo_idx);
 }
 
 static void schedule_sjf(int algo_idx) {
@@ -92,21 +104,25 @@ static void schedule_sjf(int algo_idx) {
     }
 
     if (next_proc == -1) {
-      bool all_done = true;
+      int min_at = 1000000;
+      bool any_left = false;
       for (int i = 0; i < count; i++) {
         if (!completed[i]) {
-          all_done = false;
-          current_time = procs[i].arrival_time;
-          break;
+          any_left = true;
+          if (procs[i].arrival_time < min_at) min_at = procs[i].arrival_time;
         }
       }
-      if (all_done)
-        break;
+      if (!any_left) break;
+      current_time = min_at;
       continue;
     }
 
     results[algo_idx].gantt[results[algo_idx].gantt_count].pid = procs[next_proc].pid;
     results[algo_idx].gantt[results[algo_idx].gantt_count].start_time = current_time;
+    
+    // Set response time
+    procs[next_proc].response_time = current_time - procs[next_proc].arrival_time;
+
     current_time += procs[next_proc].burst_time;
     results[algo_idx].gantt[results[algo_idx].gantt_count].end_time = current_time;
     procs[next_proc].completion_time = current_time;
@@ -115,7 +131,7 @@ static void schedule_sjf(int algo_idx) {
   }
 
   results[algo_idx].total_time = current_time;
-  compute_metrics(procs, count);
+  compute_metrics(algo_idx);
 }
 
 static void schedule_priority(int algo_idx) {
@@ -140,21 +156,25 @@ static void schedule_priority(int algo_idx) {
     }
 
     if (next_proc == -1) {
-      bool all_done = true;
+      int min_at = 1000000;
+      bool any_left = false;
       for (int i = 0; i < count; i++) {
         if (!completed[i]) {
-          all_done = false;
-          current_time = procs[i].arrival_time;
-          break;
+          any_left = true;
+          if (procs[i].arrival_time < min_at) min_at = procs[i].arrival_time;
         }
       }
-      if (all_done)
-        break;
+      if (!any_left) break;
+      current_time = min_at;
       continue;
     }
 
     results[algo_idx].gantt[results[algo_idx].gantt_count].pid = procs[next_proc].pid;
     results[algo_idx].gantt[results[algo_idx].gantt_count].start_time = current_time;
+    
+    // Set response time
+    procs[next_proc].response_time = current_time - procs[next_proc].arrival_time;
+
     current_time += procs[next_proc].burst_time;
     results[algo_idx].gantt[results[algo_idx].gantt_count].end_time = current_time;
     procs[next_proc].completion_time = current_time;
@@ -163,7 +183,7 @@ static void schedule_priority(int algo_idx) {
   }
 
   results[algo_idx].total_time = current_time;
-  compute_metrics(procs, count);
+  compute_metrics(algo_idx);
 }
 
 static void schedule_round_robin(int algo_idx) {
@@ -171,48 +191,91 @@ static void schedule_round_robin(int algo_idx) {
   int current_time = 0;
   Process *procs = results[algo_idx].processes;
   int count = base_num_processes;
-  int time_quantum = 2;
+  int time_quantum = base_time_quantum;
 
   memcpy(procs, base_processes, count * sizeof(Process));
   int remaining[MAX_PROCESSES];
   bool arrived[MAX_PROCESSES] = {false};
   int completed = 0;
+  
+  int queue[MAX_PROCESSES * 100]; 
+  int head = 0, tail = 0;
 
   for (int i = 0; i < count; i++) {
     remaining[i] = procs[i].burst_time;
   }
 
-  while (completed < count) {
-    for (int i = 0; i < count; i++) {
-      if (procs[i].arrival_time <= current_time && remaining[i] > 0) {
-        if (!arrived[i]) {
-          procs[i].response_time = current_time - procs[i].arrival_time;
-          arrived[i] = true;
-        }
+  // Find the first arrival
+  int first_arrival = 1000000;
+  for(int i=0; i<count; i++) if(procs[i].arrival_time < first_arrival) first_arrival = procs[i].arrival_time;
+  if(current_time < first_arrival) current_time = first_arrival;
 
-        int exec_time =
-            (remaining[i] > time_quantum) ? time_quantum : remaining[i];
-
-        results[algo_idx].gantt[results[algo_idx].gantt_count].pid = procs[i].pid;
-        results[algo_idx].gantt[results[algo_idx].gantt_count].start_time = current_time;
-        current_time += exec_time;
-        results[algo_idx].gantt[results[algo_idx].gantt_count].end_time = current_time;
-        remaining[i] -= exec_time;
-
-        if (remaining[i] == 0) {
-          procs[i].completion_time = current_time;
-          completed++;
-        }
-
-        results[algo_idx].gantt_count++;
-      }
+  for (int i = 0; i < count; i++) {
+    if (procs[i].arrival_time <= current_time) {
+      queue[tail++] = i;
+      arrived[i] = true;
     }
-    if (results[algo_idx].gantt_count >= MAX_GANTT_BLOCKS)
-      break;
+  }
+
+  while (completed < count) {
+    if (head < tail) {
+      int idx = queue[head++];
+      
+      if (remaining[idx] == procs[idx].burst_time) {
+          procs[idx].response_time = current_time - procs[idx].arrival_time;
+      }
+
+      int exec_time = (remaining[idx] > time_quantum) ? time_quantum : remaining[idx];
+
+      results[algo_idx].gantt[results[algo_idx].gantt_count].pid = procs[idx].pid;
+      results[algo_idx].gantt[results[algo_idx].gantt_count].start_time = current_time;
+      
+      // Crucial: check for new arrivals during execution
+      for (int t = 1; t <= exec_time; t++) {
+        current_time++;
+        for (int i = 0; i < count; i++) {
+          if (!arrived[i] && procs[i].arrival_time <= current_time) {
+            queue[tail++] = i;
+            arrived[i] = true;
+          }
+        }
+      }
+
+      remaining[idx] -= exec_time;
+      results[algo_idx].gantt[results[algo_idx].gantt_count].end_time = current_time;
+
+      if (remaining[idx] == 0) {
+        procs[idx].completion_time = current_time;
+        completed++;
+      } else {
+        queue[tail++] = idx; 
+      }
+      
+      results[algo_idx].gantt_count++;
+    } else {
+      int next_at = 1000000;
+      bool found = false;
+      for (int i = 0; i < count; i++) {
+        if (!arrived[i] && procs[i].arrival_time < next_at) {
+          next_at = procs[i].arrival_time;
+          found = true;
+        }
+      }
+      if (found) {
+        current_time = next_at;
+        for (int i = 0; i < count; i++) {
+          if (!arrived[i] && procs[i].arrival_time <= current_time) {
+            queue[tail++] = i;
+            arrived[i] = true;
+          }
+        }
+      } else break;
+    }
+    if (results[algo_idx].gantt_count >= MAX_GANTT_BLOCKS) break;
   }
 
   results[algo_idx].total_time = current_time;
-  compute_metrics(procs, count);
+  compute_metrics(algo_idx);
 }
 
 static void run_all_schedules(void) {
@@ -232,7 +295,7 @@ void do_scheduler(WINDOW *win) {
   if (!input_active && base_num_processes == 0) {
     mvwprintw(win, 3, 2, "Welcome to the Process Scheduler Simulator!");
     mvwprintw(win, 5, 2, "Displays all 4 algorithms: FCFS, SJF, Priority, RR");
-    mvwprintw(win, 7, 2, "Press [ e ] to start interactive setup.");
+    mvwprintw(win, 7, 2, "Press [ x ] to start interactive setup.");
     return;
   }
 
@@ -240,6 +303,11 @@ void do_scheduler(WINDOW *win) {
     if (input_state == INPUT_NUM_PROCS) {
       wattron(win, COLOR_PAIR(C_WARNING) | A_BOLD);
       mvwprintw(win, 3, 2, "Enter number of processes (1-20): ");
+      wattroff(win, COLOR_PAIR(C_WARNING) | A_BOLD);
+      mvwprintw(win, 4, 2, "Current input: %s_", input_buffer);
+    } else if (input_state == INPUT_TIME_QUANTUM) {
+      wattron(win, COLOR_PAIR(C_WARNING) | A_BOLD);
+      mvwprintw(win, 3, 2, "Enter Time Quantum for Round Robin: ");
       wattroff(win, COLOR_PAIR(C_WARNING) | A_BOLD);
       mvwprintw(win, 4, 2, "Current input: %s_", input_buffer);
     } else if (input_state == INPUT_PROCESS_AT) {
@@ -268,53 +336,86 @@ void do_scheduler(WINDOW *win) {
   }
 
   wattron(win, COLOR_PAIR(C_HEADER) | A_BOLD);
-  mvwprintw(win, 3, 2, "Scheduling Results - All Algorithms");
+  mvwprintw(win, 3, 2, "                                          "); // Clear line
+  mvwprintw(win, 3, 2, "--- Scheduling Results ---"); 
   wattroff(win, COLOR_PAIR(C_HEADER) | A_BOLD);
 
   const char *algo_names[] = {"FCFS", "SJF", "Priority", "Round Robin"};
-  int base_y = 5;
+  int current_line = 0;
+  int display_row = 5; 
 
   for (int algo = 0; algo < 4; algo++) {
-    int y = base_y + algo * 6;
-    if (y >= max_y - 5)
-      break;
+    // Each algorithm block has: Title (1), Gantt (1), Header (1), Processes (N), Spacer (1)
+    
+    // Title
+    if (current_line >= sched_scroll_offset && display_row < max_y - 8) {
+      wattron(win, COLOR_PAIR(C_HEADER));
+      mvwprintw(win, display_row++, 2, "%s (Total Time: %d) Avg WT: %.2f Avg TAT: %.2f", 
+                algo_names[algo], results[algo].total_time, 
+                results[algo].avg_wt, results[algo].avg_tat);
+      wattroff(win, COLOR_PAIR(C_HEADER));
+    }
+    current_line++;
 
-    wattron(win, COLOR_PAIR(C_HEADER));
-    mvwprintw(win, y, 2, "%s (Total Time: %d)", algo_names[algo],
-              results[algo].total_time);
-    wattroff(win, COLOR_PAIR(C_HEADER));
+    // Gantt
+    if (current_line >= sched_scroll_offset && display_row < max_y - 8) {
+      int gantt_x = 2;
+      mvwprintw(win, display_row, gantt_x, "Gantt: ");
+      gantt_x += 7;
+      for (int i = 0; i < results[algo].gantt_count && gantt_x < max_x - 10; i++) {
+        mvwprintw(win, display_row, gantt_x, "P%d|", results[algo].gantt[i].pid);
+        gantt_x += 4;
+      }
+      display_row++;
+    }
+    current_line++;
 
-    int gantt_y = y + 1;
-    for (int i = 0; i < results[algo].gantt_count && gantt_y < y + 4; i++) {
-      int pid = results[algo].gantt[i].pid;
-      int start = results[algo].gantt[i].start_time;
-      int end = results[algo].gantt[i].end_time;
-      mvwprintw(win, gantt_y, 2, "  P%d [%d-%d]", pid, start, end);
-      if (i > 0 && i % 2 == 1)
-        gantt_y++;
+    // Metrics Header
+    if (current_line >= sched_scroll_offset && display_row < max_y - 8) {
+      wattron(win, COLOR_PAIR(C_NORMAL) | A_UNDERLINE);
+      mvwprintw(win, display_row++, 2, "PID  AT  BT  PRI  CT  TAT  WT  RT");
+      wattroff(win, COLOR_PAIR(C_NORMAL) | A_UNDERLINE);
+    }
+    current_line++;
+
+    // Processes
+    for (int i = 0; i < base_num_processes; i++) {
+      if (current_line >= sched_scroll_offset && display_row < max_y - 8) {
+        Process *p = &results[algo].processes[i];
+        int color = (p->waiting_time < 5) ? C_HEALTHY : C_WARNING;
+        wattron(win, COLOR_PAIR(color));
+        mvwprintw(win, display_row++, 2, "P%-2d  %-2d  %-2d  %-3d  %-2d  %-3d  %-2d  %-2d", 
+                  p->pid, p->arrival_time, p->burst_time, p->priority, p->completion_time,
+                  p->turnaround_time, p->waiting_time, p->response_time);
+        wattroff(win, COLOR_PAIR(color));
+      }
+      current_line++;
     }
 
-    int metrics_y = y + 4;
-    wattron(win, COLOR_PAIR(C_NORMAL));
-    mvwprintw(win, metrics_y, 2, "PID AT BT CT WT TAT RT");
-    for (int i = 0; i < base_num_processes && metrics_y + i + 1 < y + 6; i++) {
-      Process *p = &results[algo].processes[i];
-      int color = (p->waiting_time < 5) ? C_HEALTHY : C_WARNING;
-      wattron(win, COLOR_PAIR(color));
-      mvwprintw(win, metrics_y + i + 1, 2, "P%d %d %d %d %d %d %d", p->pid,
-                p->arrival_time, p->burst_time, p->completion_time,
-                p->waiting_time, p->turnaround_time, p->response_time);
-      wattroff(win, COLOR_PAIR(color));
+    // Spacer
+    if (current_line >= sched_scroll_offset && display_row < max_y - 8) {
+      display_row++;
     }
+    current_line++;
+    
+    if (display_row >= max_y - 8) break;
   }
 
   wattron(win, COLOR_PAIR(C_NORMAL) | A_BOLD);
-  mvwprintw(win, max_y - 2, 2, "Press [ n ] for new schedule, [ p/m/d/i/c/g/s/t ] to switch");
+  mvwprintw(win, max_y - 2, 2, "Press [ x ] for new schedule, [ p/m/d/i/c/g/s/t ] to switch");
   wattroff(win, COLOR_PAIR(C_NORMAL) | A_BOLD);
 }
 
 void scheduler_handle_input(char ch) {
-  if (ch == 'e' && !input_active) {
+  if ((ch == 'x' || ch == 'X') && !input_active) {
+    if (simulation_complete) {
+      simulation_complete = false;
+      base_num_processes = 0;
+      processes_entered = 0;
+      memset(base_processes, 0, sizeof(base_processes));
+      memset(results, 0, sizeof(results));
+      sched_scroll_offset = 0;
+    }
     input_active = true;
     input_state = INPUT_NUM_PROCS;
     memset(input_buffer, 0, sizeof(input_buffer));
@@ -325,13 +426,6 @@ void scheduler_handle_input(char ch) {
   }
 
   if (!input_active) {
-    if (ch == 'n' && simulation_complete) {
-      simulation_complete = false;
-      base_num_processes = 0;
-      processes_entered = 0;
-      memset(base_processes, 0, sizeof(base_processes));
-      memset(results, 0, sizeof(results));
-    }
     return;
   }
 
@@ -360,6 +454,13 @@ void scheduler_handle_input(char ch) {
       int num = atoi(input_buffer);
       if (num > 0 && num <= MAX_PROCESSES) {
         base_num_processes = num;
+        input_state = INPUT_TIME_QUANTUM;
+        memset(input_buffer, 0, sizeof(input_buffer));
+      }
+    } else if (input_state == INPUT_TIME_QUANTUM) {
+      int tq = atoi(input_buffer);
+      if (tq > 0) {
+        base_time_quantum = tq;
         processes_entered = 0;
         input_state = INPUT_PROCESS_AT;
         memset(input_buffer, 0, sizeof(input_buffer));
