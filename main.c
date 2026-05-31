@@ -4,12 +4,14 @@
 #include "scheduler.h"
 #include "os_stats.h"
 #include "fs_sim.h"
+#include "web_server.h"
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
+#include <unistd.h>
+//make clean && make && ./bin/zenith_os --web --port 8080
 void main_event_loop(void) {
   while (is_running) {
     for (int i = 0; i < 49; i++) {
@@ -124,53 +126,30 @@ void main_event_loop(void) {
 }
 
 int main(int argc, char *argv[]) {
-  (void)argc;
-  (void)argv;
+  int port = 8080;
 
-  initscr();
-  srand((unsigned)time(NULL));
-
-  for (int i = 0; i < 5; i++) {
-    get_cpu_load();
+  // Parse command-line arguments
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
+      port = atoi(argv[++i]);
+    } else if (strcmp(argv[i], "--help") == 0) {
+      printf("Zenith-OS - System Diagnostics Tool\n");
+      printf("Usage: zenith_os [OPTIONS]\n");
+      printf("Options:\n");
+      printf("  --port PORT        Specify port for web server (default: 8080)\n");
+      printf("  --help             Show this help message\n");
+      return 0;
+    }
   }
 
-  set_escdelay(25);
-  cbreak();
-  noecho();
-  keypad(stdscr, TRUE);
-  nodelay(stdscr, TRUE);
-  timeout(1000);
-
-  if (has_colors()) {
-    start_color();
-    init_pair(C_HEALTHY, COLOR_GREEN, COLOR_BLACK);
-    init_pair(C_STRESS, COLOR_RED, COLOR_BLACK);
-    init_pair(C_HEADER, COLOR_CYAN, COLOR_BLACK);
-    init_pair(C_NORMAL, COLOR_WHITE, COLOR_BLACK);
-    init_pair(C_GHOST, COLOR_RED, COLOR_BLACK);
-    init_pair(C_WARNING, COLOR_YELLOW, COLOR_BLACK);
+  // Start the web server by default
+  start_web_server(port);
+  printf("Press Ctrl+C to stop the server...\n");
+  while (is_web_server_running()) {
+    sleep(1);
   }
-
-  clearok(stdscr, TRUE);
-
-  getmaxyx(stdscr, max_y, max_x);
-  const int header_h = 5;
-  const int footer_h = 7;
-  const int dead_zone = 2;
-  const int main_h = max_y - header_h - footer_h - dead_zone;
-
-  hdr_win = newwin(header_h, max_x, 0, 0);
-  main_win = newwin(main_h > 1 ? main_h : 1, max_x, header_h, 0);
-  ftr_win = newwin(footer_h, max_x, max_y - footer_h, 0);
-
-  main_event_loop();
 
   cleanup_sync();
-
-  delwin(hdr_win);
-  delwin(main_win);
-  delwin(ftr_win);
-  endwin();
 
   return 0;
 }
